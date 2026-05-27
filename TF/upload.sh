@@ -125,12 +125,8 @@ echo ""
 log "=== Session started ==="
 check_deps
 
-# ── Bucket Detection ─────────────────────────────────────────
-BUCKET=$(aws s3 ls | awk '{print $3}' | grep "mybuckets123tarunv6" | head -n 1)
-if [ -z "$BUCKET" ]; then
-    echo -e "${RED}No matching bucket found. Enter bucket name manually:${NC}"
-    read -rp "Bucket: " BUCKET
-fi
+# ── Bucket (hardcoded) ───────────────────────────────────────
+BUCKET="mybuckets123tarunv6"
 echo -e "${BLU}Bucket : ${BLD}$BUCKET${NC}"
 
 # ── S3 Prefix ────────────────────────────────────────────────
@@ -210,19 +206,19 @@ for i in $(seq 1 "$ZIP_COUNT"); do
     read -rp "  Name: " NAME
     ZIP_NAMES[$i]="$NAME"
 
-    # Format
+    # Format — default RAR
     echo -e "  Format:  ${YEL}1) ZIP   2) RAR${NC}"
-    read -rp "  Choice [1/2, default 1]: " FMT
-    [[ "$FMT" == "2" ]] && ZIP_FORMAT[$i]="rar" || ZIP_FORMAT[$i]="zip"
+    read -rp "  Choice [1/2, default 2]: " FMT
+    [[ "$FMT" == "1" ]] && ZIP_FORMAT[$i]="zip" || ZIP_FORMAT[$i]="rar"
 
     # Split
     read -rp "  Split into parts? Enter size in MB (0 = no split): " SPLIT_MB
     ZIP_SPLIT[$i]="${SPLIT_MB:-0}"
 
-    # Compression level
+    # Compression level — default 0
     echo -e "  Compression: ${YEL}0=store(fastest) → 9=max(smallest)${NC}"
-    read -rp "  Level [0-9, default 5]: " LVL
-    ZIP_LEVEL[$i]="${LVL:-5}"
+    read -rp "  Level [0-9, default 0]: " LVL
+    ZIP_LEVEL[$i]="${LVL:-0}"
 
     # Per-archive password
     read -rsp "  Password (Enter = use default '$GLOBAL_PASS'): " APASS
@@ -235,20 +231,37 @@ done
 
 # ── Assign Files ─────────────────────────────────────────────
 echo -e "\n${YEL}--- Assign Files to Archives ---${NC}"
-for ITEM in "${VALID_FILES[@]}"; do
-    FSIZE=$(get_size "$SOURCE/$ITEM")
-    echo -e "\n  ${BLD}${YEL}$ITEM${NC}  ${DIM}($(human_size ${FSIZE:-0}))${NC}"
-    for i in $(seq 1 "$ZIP_COUNT"); do
-        echo -e "  $i) ${ZIP_NAMES[$i]}  [${ZIP_FORMAT[$i]}]"
-    done
-    read -rp "  Assign to (1-$ZIP_COUNT) or 's' to skip: " CHOICE
-    if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -le "$ZIP_COUNT" ]; then
-        FILE_ASSIGNMENTS[$CHOICE]+="$ITEM"$'\n'
-        echo -e "  ${GRN}✓ → ${ZIP_NAMES[$CHOICE]}${NC}"
-    else
-        echo -e "  ${DIM}⊗ Skipped${NC}"
+
+# Single archive bulk-add option
+BULK_ADD=false
+if [ "$ZIP_COUNT" -eq 1 ]; then
+    read -rp "$(echo -e ${YEL})Add all files to this archive? [Y/n]: $(echo -e ${NC})" BULK
+    if [[ ! "$BULK" =~ ^[Nn]$ ]]; then
+        BULK_ADD=true
     fi
-done
+fi
+
+if $BULK_ADD; then
+    for ITEM in "${VALID_FILES[@]}"; do
+        FILE_ASSIGNMENTS[1]+="$ITEM"$'\n'
+    done
+    echo -e "  ${GRN}✓ All files assigned to ${ZIP_NAMES[1]}${NC}"
+else
+    for ITEM in "${VALID_FILES[@]}"; do
+        FSIZE=$(get_size "$SOURCE/$ITEM")
+        echo -e "\n  ${BLD}${YEL}$ITEM${NC}  ${DIM}($(human_size ${FSIZE:-0}))${NC}"
+        for i in $(seq 1 "$ZIP_COUNT"); do
+            echo -e "  $i) ${ZIP_NAMES[$i]}  [${ZIP_FORMAT[$i]}]"
+        done
+        read -rp "  Assign to (1-$ZIP_COUNT) or 's' to skip: " CHOICE
+        if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -le "$ZIP_COUNT" ]; then
+            FILE_ASSIGNMENTS[$CHOICE]+="$ITEM"$'\n'
+            echo -e "  ${GRN}✓ → ${ZIP_NAMES[$CHOICE]}${NC}"
+        else
+            echo -e "  ${DIM}⊗ Skipped${NC}"
+        fi
+    done
+fi
 
 # ── Calculate Total Size ─────────────────────────────────────
 TOTAL_SIZE=0
@@ -336,8 +349,6 @@ for i in $(seq 1 "$ZIP_COUNT"); do
     # ── ZIP ───────────────────────────────────────────────────
     if [ "$FMT" = "zip" ]; then
         if [ "${SPLIT:-0}" -gt 0 ]; then
-            # zip doesn't do clean splits — use zip then zsplit trick
-            # Actually we use zip normally, then split with proper ext
             ZIP_ARGS=("-r" "-$LVL")
             [ -n "$PASS" ] && ZIP_ARGS+=("-P" "$PASS")
             echo "${FILE_LIST[@]}" | tr ' ' '\n' | \
@@ -345,7 +356,6 @@ for i in $(seq 1 "$ZIP_COUNT"); do
             ZIP_PID=$!
             watch_zip_progress "$OUTFILE" "$ARCHIVE_SIZE" "$ZIP_PID" "Zipping"
             wait "$ZIP_PID"
-            # Split into parts with .zip extension
             SPLIT_BYTES=$(( SPLIT * 1024 * 1024 ))
             split -b "$SPLIT_BYTES" -d --additional-suffix=".zip" "$OUTFILE" "$TEMP_DIR/${NAME}.part"
             rm -f "$OUTFILE"

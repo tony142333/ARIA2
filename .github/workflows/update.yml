@@ -1,0 +1,18 @@
+name: Upload Files To S3
+name: Upload Script Workflow
+
+on:
+  push:
+    paths:
+      - 'TF/upload.sh'
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: File Changed
+        run: echo "TF/upload.sh was updated"

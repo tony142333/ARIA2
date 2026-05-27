@@ -14,11 +14,16 @@ aws s3 rm s3://mybuckets123tarunv6/
 aws s3 presign s3://mybuckets123tarunv6/  --region ap-south-2 --expires-in 2000
 
 
-aws s3 sync . s3://mybuckets123tarunv6/movies/ --region ap-south-
-
+aws s3 sync . s3://mybuckets123tarunv6/movies/ --region ap-south-2
 
 
 screen
 
+screen -d -r
+
+screen -r
 
 
+
+
+    

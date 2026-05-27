@@ -22,4 +22,4 @@ jobs:
 
       - name: Upload File To S3
         run: |
-          aws s3 cp TF/upload.sh s3://${{ secrets.S3_BUCKET }}/upload.sh
+          aws s3 cp TF/upload.sh s3://${{ secrets.S3_BUCKET }}/scripts/upload.sh

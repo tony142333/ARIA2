@@ -24,6 +24,7 @@ screen -d -r
 screen -r
 
 
+screen
 
 
     

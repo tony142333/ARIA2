@@ -1,5 +1,5 @@
 name: Upload Files To S3
-name: Upload Script Workflow
+
 
 on:
   push:

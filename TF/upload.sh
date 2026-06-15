@@ -1,8 +1,9 @@
 #!/bin/bash
 # ============================================================
-#  Interactive S3 Batcher — Version 3.0
+#  Interactive S3 Batcher — Version 3.1
 #  Features: RAR splits, real ETA, compression options,
-#  junk filter, dry-run, summary screen, logging, pv upload
+#  junk filter, dry-run, summary screen, logging, pv upload,
+#  + SMART SEQUENTIAL PART MODE (space-compensating bin packing)
 # ============================================================
 
 # ── Colors ──────────────────────────────────────────────────
@@ -49,6 +50,13 @@ human_size() {
 # ── Get Size in Bytes ────────────────────────────────────────
 get_size() {
     du -sb "$1" 2>/dev/null | awk '{print $1}'
+}
+
+# ── Get Free Disk Space (bytes) ───────────────────────────────
+get_free_bytes() {
+    local kb
+    kb=$(df "$TEMP_DIR" | tail -1 | awk '{print $4}')
+    echo $(( kb * 1024 ))
 }
 
 # ── Real Progress Bar with ETA ───────────────────────────────
@@ -112,13 +120,203 @@ is_junk() {
     return 1
 }
 
+# ── Upload Single File (returns 0 on verified success) ───────
+upload_file() {
+    local UF="$1" UF_BASE UF_SIZE
+    [ -f "$UF" ] || return 1
+    UF_SIZE=$(stat -c%s "$UF")
+    UF_BASE=$(basename "$UF")
+    echo -e "\n${YEL}Uploading: $UF_BASE ($(human_size $UF_SIZE))${NC}"
+    log "Uploading $UF_BASE to s3://$BUCKET/$S3_PREFIX$UF_BASE"
+
+    (
+        pv -pterb -s "$UF_SIZE" "$UF" | \
+        aws s3 cp - "s3://$BUCKET/$S3_PREFIX$UF_BASE" \
+            --region ap-south-2 \
+            --expected-size "$UF_SIZE" \
+            --no-progress 2>/dev/null
+    )
+    local UP_EXIT=$?
+
+    if [ $UP_EXIT -eq 0 ]; then
+        aws s3api head-object --bucket "$BUCKET" \
+            --key "${S3_PREFIX}${UF_BASE}" &>/dev/null
+        if [ $? -eq 0 ]; then
+            echo -e "${GRN}✓ Verified in S3: $UF_BASE${NC}"
+            log "SUCCESS: $UF_BASE uploaded and verified"
+            return 0
+        else
+            echo -e "${RED}✗ Upload succeeded but S3 verification failed: $UF_BASE${NC}"
+            log "WARN: $UF_BASE upload ok but head-object failed"
+            return 1
+        fi
+    else
+        echo -e "${RED}✗ Upload failed: $UF_BASE${NC}"
+        log "FAIL: $UF_BASE upload failed"
+        return 1
+    fi
+}
+
+# ── Bin-Pack Files Into Sequential Parts ──────────────────────
+# Greedy bin-packing: each part is filled with whole files until
+# the next file would exceed PART_LIMIT_BYTES (or free disk space,
+# whichever is smaller). Files are never split across parts.
+# Populates global array BIN_PARTS (newline-separated file lists,
+# one element per part).
+bin_pack_files() {
+    local part_limit_bytes=$1; shift
+    local -a files=("$@")
+    BIN_PARTS=()
+    local current_part="" current_size=0
+
+    for F in "${files[@]}"; do
+        local SZ
+        SZ=$(get_size "$SOURCE/$F")
+        SZ=${SZ:-0}
+
+        # If a single file alone exceeds the limit, it gets its own part.
+        if [ "$SZ" -gt "$part_limit_bytes" ]; then
+            if [ -n "$current_part" ]; then
+                BIN_PARTS+=("$current_part")
+                current_part=""; current_size=0
+            fi
+            BIN_PARTS+=("$F"$'\n')
+            continue
+        fi
+
+        if [ $(( current_size + SZ )) -gt "$part_limit_bytes" ] && [ -n "$current_part" ]; then
+            BIN_PARTS+=("$current_part")
+            current_part=""; current_size=0
+        fi
+
+        current_part+="$F"$'\n'
+        current_size=$(( current_size + SZ ))
+    done
+
+    [ -n "$current_part" ] && BIN_PARTS+=("$current_part")
+}
+
+# ── Process Archive in SMART SEQUENTIAL PART MODE ─────────────
+# Builds, uploads, and deletes one part at a time so that disk
+# space freed by deleting already-uploaded originals (and the
+# previous part's archive) compensates for the next part.
+# No single file is ever split between parts — part sizes may
+# vary depending on which files fit.
+process_smart_sequential() {
+    local NAME="$1" FMT="$2" LVL="$3" PASS="$4"
+    shift 4
+    local -a FILE_LIST=("$@")
+
+    local free_bytes
+    free_bytes=$(get_free_bytes)
+    # Leave a safety margin (5%) so we don't fill the disk to 0.
+    local part_limit_bytes=$(( free_bytes * 95 / 100 ))
+
+    if [ "$part_limit_bytes" -le 0 ]; then
+        echo -e "${RED}✗ Not enough free space to build even one part for $NAME.${NC}"
+        log "FAIL: $NAME — no usable free space for smart sequential mode"
+        return 1
+    fi
+
+    bin_pack_files "$part_limit_bytes" "${FILE_LIST[@]}"
+    local NUM_PARTS=${#BIN_PARTS[@]}
+
+    if [ "$NUM_PARTS" -eq 0 ]; then
+        echo -e "${YEL}Nothing to do for $NAME.${NC}"
+        return 0
+    fi
+
+    echo -e "  ${CYN}[SMART MODE] $NAME will be split into $NUM_PARTS part(s) based on available space (~$(human_size $part_limit_bytes) per part, parts may vary in size)${NC}"
+    log "SMART MODE: $NAME -> $NUM_PARTS part(s), limit ~$(human_size $part_limit_bytes)/part"
+
+    local PART_NUM=1
+    for PART_FILES in "${BIN_PARTS[@]}"; do
+        local -a CUR_FILES=()
+        local PART_SIZE=0
+        while IFS= read -r ITEM; do
+            [ -z "$ITEM" ] && continue
+            CUR_FILES+=("$ITEM")
+            SZ=$(get_size "$SOURCE/$ITEM")
+            PART_SIZE=$(( PART_SIZE + ${SZ:-0} ))
+        done <<< "$PART_FILES"
+
+        local PART_NAME="${NAME}.part${PART_NUM}"
+        local OUTFILE="$TEMP_DIR/${PART_NAME}.${FMT}"
+
+        echo -e "\n${BLU}${BLD}▶ $PART_NAME.$FMT${NC}  (${#CUR_FILES[@]} file(s), $(human_size $PART_SIZE))"
+        log "Building $PART_NAME.$FMT (${#CUR_FILES[@]} files, $(human_size $PART_SIZE))"
+
+        # Check store-mode for this part (all media)
+        local PART_LVL="$LVL"
+        local ALL_MEDIA=true
+        for F in "${CUR_FILES[@]}"; do
+            is_media "$F" || { ALL_MEDIA=false; break; }
+        done
+        if $ALL_MEDIA && [ "$PART_LVL" -gt 0 ]; then
+            echo -e "  ${DIM}All files in this part are media — switching to store mode (level 0)${NC}"
+            PART_LVL=0
+        fi
+
+        cd "$SOURCE" || return 1
+
+        if [ "$FMT" = "zip" ]; then
+            local ZIP_ARGS=("-r" "-$PART_LVL")
+            [ -n "$PASS" ] && ZIP_ARGS+=("-P" "$PASS")
+            zip "${ZIP_ARGS[@]}" "$OUTFILE" "${CUR_FILES[@]}" > /dev/null 2>&1 &
+            local PID=$!
+            watch_zip_progress "$OUTFILE" "$PART_SIZE" "$PID" "Zipping"
+            wait "$PID"
+        else
+            local RAR_ARGS=("a" "-r" "-m$PART_LVL" "-ep1")
+            [ -n "$PASS" ] && RAR_ARGS+=("-p$PASS")
+            RAR_ARGS+=("$OUTFILE" "${CUR_FILES[@]}")
+            rar "${RAR_ARGS[@]}" > /dev/null 2>&1 &
+            local PID=$!
+            watch_zip_progress "$OUTFILE" "$PART_SIZE" "$PID" "Compressing"
+            wait "$PID"
+        fi
+
+        # Upload this part immediately
+        if [ -f "$OUTFILE" ]; then
+            if upload_file "$OUTFILE"; then
+                rm -f "$OUTFILE"
+
+                # Delete originals for this part to free up space
+                # for the next part (this is the core space
+                # compensation mechanism of smart sequential mode).
+                for F in "${CUR_FILES[@]}"; do
+                    if [ -e "$SOURCE/$F" ]; then
+                        rm -rf "$SOURCE/$F"
+                        echo -e "  ${DIM}Freed space, deleted original: $F${NC}"
+                        log "Deleted original (smart mode): $F"
+                    fi
+                done
+            else
+                echo -e "${RED}✗ Aborting $NAME — part $PART_NUM failed to upload. Originals for this part kept; archive left on disk for retry.${NC}"
+                log "FAIL: $NAME part $PART_NUM upload failed — aborting remaining parts"
+                return 1
+            fi
+        else
+            echo -e "${RED}✗ Failed to create $PART_NAME.$FMT — aborting.${NC}"
+            log "FAIL: $NAME part $PART_NUM archive creation failed"
+            return 1
+        fi
+
+        PART_NUM=$(( PART_NUM + 1 ))
+    done
+
+    echo -e "${GRN}✓ Smart sequential mode complete for $NAME ($((PART_NUM-1)) part(s))${NC}"
+    log "SMART MODE COMPLETE: $NAME — $((PART_NUM-1)) part(s)"
+    return 0
+}
+
 # ════════════════════════════════════════════════════════════
 #  MAIN
 # ════════════════════════════════════════════════════════════
 clear
 echo -e "${BLD}${GRN}"
 echo "  ╔══════════════════════════════════════════╗"
-echo "  ║     Interactive S3 Batcher  v3.0         ║"
+echo "  ║     Interactive S3 Batcher  v3.1         ║"
 echo "  ╚══════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -199,6 +397,7 @@ declare -A ZIP_FORMAT      # zip or rar
 declare -A ZIP_SPLIT       # split size in MB, 0 = no split
 declare -A ZIP_LEVEL       # compression level 0-9
 declare -A ZIP_PASS        # per-archive password
+declare -A ZIP_MODE        # "normal" or "smart" (smart sequential parts)
 declare -A FILE_ASSIGNMENTS
 
 for i in $(seq 1 "$ZIP_COUNT"); do
@@ -226,6 +425,7 @@ for i in $(seq 1 "$ZIP_COUNT"); do
     [ -z "$APASS" ] && APASS="$GLOBAL_PASS"
     ZIP_PASS[$i]="$APASS"
 
+    ZIP_MODE[$i]="normal"
     FILE_ASSIGNMENTS[$i]=""
 done
 
@@ -274,6 +474,43 @@ for i in $(seq 1 "$ZIP_COUNT"); do
     done <<< "${FILE_ASSIGNMENTS[$i]}"
 done
 
+# ── Feasibility Check / Smart Mode Detection ─────────────────
+# If the combined assignment for an archive (roughly, since
+# compression may reduce it somewhat) cannot fit alongside the
+# rest of the plan within available disk space, offer SMART
+# SEQUENTIAL PART MODE for that archive instead of aborting.
+# This is an ADDITIONAL option — normal single-archive/RAR-split
+# behavior is untouched unless the user opts in.
+echo -e "\n${YEL}--- Feasibility Check ---${NC}"
+for i in $(seq 1 "$ZIP_COUNT"); do
+    [ -z "${FILE_ASSIGNMENTS[$i]}" ] && continue
+
+    ARCHIVE_SIZE=0
+    while IFS= read -r ITEM; do
+        [ -z "$ITEM" ] && continue
+        [ -e "$SOURCE/$ITEM" ] || continue
+        SZ=$(get_size "$SOURCE/$ITEM")
+        ARCHIVE_SIZE=$(( ARCHIVE_SIZE + ${SZ:-0} ))
+    done <<< "${FILE_ASSIGNMENTS[$i]}"
+
+    # Worst case: source files + full archive copy must coexist
+    # on disk at once (no deletion until upload succeeds).
+    NEEDED=$(( ARCHIVE_SIZE * 2 ))
+
+    if (( NEEDED > AVAILABLE_BYTES )); then
+        echo -e "  ${RED}⚠ Archive '${ZIP_NAMES[$i]}' (${ZIP_FORMAT[$i]}) needs roughly $(human_size $NEEDED) of working space but only $(human_size $AVAILABLE_BYTES) is available.${NC}"
+        echo -e "  ${CYN}This archive isn't feasible as a single combined file with the current free space.${NC}"
+        read -rp "  $(echo -e ${YEL})Use SMART SEQUENTIAL PART MODE for this archive (build/upload/delete one part at a time, no file split between parts, part sizes may vary)? [Y/n]: $(echo -e ${NC})" SMART_CHOICE
+        if [[ ! "$SMART_CHOICE" =~ ^[Nn]$ ]]; then
+            ZIP_MODE[$i]="smart"
+            echo -e "  ${GRN}✓ '${ZIP_NAMES[$i]}' will use smart sequential part mode.${NC}"
+            log "Archive ${ZIP_NAMES[$i]}: needs $(human_size $NEEDED), available $(human_size $AVAILABLE_BYTES) — using smart sequential mode"
+        else
+            echo -e "  ${DIM}Keeping normal mode for '${ZIP_NAMES[$i]}'. The disk-space check before processing may abort the whole run.${NC}"
+        fi
+    fi
+done
+
 # ── Summary Screen ───────────────────────────────────────────
 echo -e "\n${BLD}${GRN}════════ SUMMARY ════════${NC}"
 echo -e "  Bucket      : ${BLD}s3://$BUCKET/$S3_PREFIX${NC}"
@@ -285,10 +522,19 @@ echo ""
 for i in $(seq 1 "$ZIP_COUNT"); do
     [ -z "${FILE_ASSIGNMENTS[$i]}" ] && continue
     COUNT=$(echo "${FILE_ASSIGNMENTS[$i]}" | grep -c '\S')
-    echo -e "  Archive #$i  : ${BLD}${ZIP_NAMES[$i]}.${ZIP_FORMAT[$i]}${NC}  |  $COUNT file(s)  |  level ${ZIP_LEVEL[$i]}  |  split ${ZIP_SPLIT[$i]}MB  |  pass $([ -n "${ZIP_PASS[$i]}" ] && echo '***' || echo 'none')"
+    MODE_LABEL="${ZIP_MODE[$i]}"
+    echo -e "  Archive #$i  : ${BLD}${ZIP_NAMES[$i]}.${ZIP_FORMAT[$i]}${NC}  |  $COUNT file(s)  |  level ${ZIP_LEVEL[$i]}  |  split ${ZIP_SPLIT[$i]}MB  |  mode ${BLD}$MODE_LABEL${NC}  |  pass $([ -n "${ZIP_PASS[$i]}" ] && echo '***' || echo 'none')"
 done
 
-if (( TOTAL_SIZE > AVAILABLE_BYTES )); then
+# Only block on global space if no archive is using smart mode
+# to absorb the shortfall — smart mode handles its own space
+# management part-by-part.
+ANY_SMART=false
+for i in $(seq 1 "$ZIP_COUNT"); do
+    [ "${ZIP_MODE[$i]}" = "smart" ] && ANY_SMART=true
+done
+
+if (( TOTAL_SIZE > AVAILABLE_BYTES )) && ! $ANY_SMART; then
     echo -e "\n${RED}✗ Not enough disk space! Aborting.${NC}"
     log "ABORT: Not enough disk space. Required $(human_size $TOTAL_SIZE), available $(human_size $AVAILABLE_BYTES)"
     exit 1
@@ -308,11 +554,12 @@ for i in $(seq 1 "$ZIP_COUNT"); do
     SPLIT="${ZIP_SPLIT[$i]}"
     LVL="${ZIP_LEVEL[$i]}"
     PASS="${ZIP_PASS[$i]}"
+    MODE="${ZIP_MODE[$i]}"
 
     [ -z "${FILE_ASSIGNMENTS[$i]}" ] && continue
 
     echo -e "\n${BLU}${BLD}▶ Archive: $NAME.$FMT${NC}"
-    log "Starting archive: $NAME.$FMT"
+    log "Starting archive: $NAME.$FMT (mode=$MODE)"
 
     # Build file list
     FILE_LIST=()
@@ -327,14 +574,28 @@ for i in $(seq 1 "$ZIP_COUNT"); do
     OUTFILE="$TEMP_DIR/$NAME.$FMT"
 
     if $DRY_RUN; then
-        echo -e "  ${CYN}[DRY RUN] Would archive: ${FILE_LIST[*]}${NC}"
-        echo -e "  ${CYN}[DRY RUN] Output: $OUTFILE  ($(human_size $ARCHIVE_SIZE))${NC}"
+        if [ "$MODE" = "smart" ]; then
+            echo -e "  ${CYN}[DRY RUN] [SMART MODE] $NAME — would bin-pack ${#FILE_LIST[@]} file(s) into sequential parts based on free space at run time, uploading and deleting originals after each part.${NC}"
+        else
+            echo -e "  ${CYN}[DRY RUN] Would archive: ${FILE_LIST[*]}${NC}"
+            echo -e "  ${CYN}[DRY RUN] Output: $OUTFILE  ($(human_size $ARCHIVE_SIZE))${NC}"
+        fi
         $DELETE_ORIGINALS && echo -e "  ${CYN}[DRY RUN] Would delete originals after upload${NC}"
-        log "DRY RUN: $NAME.$FMT — ${FILE_LIST[*]}"
+        log "DRY RUN: $NAME.$FMT (mode=$MODE) — ${FILE_LIST[*]}"
         continue
     fi
 
     cd "$SOURCE" || exit
+
+    # ── SMART SEQUENTIAL PART MODE ───────────────────────────
+    if [ "$MODE" = "smart" ]; then
+        process_smart_sequential "$NAME" "$FMT" "$LVL" "$PASS" "${FILE_LIST[@]}"
+        # In smart mode, originals are deleted part-by-part as a
+        # core part of the mechanism, regardless of the global
+        # DELETE_ORIGINALS toggle (deletion is required to free
+        # space for subsequent parts). Continue to next archive.
+        continue
+    fi
 
     # ── Check if media only (store mode) ─────────────────────
     ALL_MEDIA=true
@@ -388,36 +649,8 @@ for i in $(seq 1 "$ZIP_COUNT"); do
 
     for UF in "${UPLOAD_FILES[@]}"; do
         [ -f "$UF" ] || continue
-        UF_SIZE=$(stat -c%s "$UF")
-        UF_BASE=$(basename "$UF")
-        echo -e "\n${YEL}Uploading: $UF_BASE ($(human_size $UF_SIZE))${NC}"
-        log "Uploading $UF_BASE to s3://$BUCKET/$S3_PREFIX$UF_BASE"
-
-        START_UP=$(date +%s)
-        (
-            pv -pterb -s "$UF_SIZE" "$UF" | \
-            aws s3 cp - "s3://$BUCKET/$S3_PREFIX$UF_BASE" \
-                --region ap-south-2 \
-                --expected-size "$UF_SIZE" \
-                --no-progress 2>/dev/null
-        )
-        UP_EXIT=$?
-
-        if [ $UP_EXIT -eq 0 ]; then
-            # Verify via head-object
-            aws s3api head-object --bucket "$BUCKET" \
-                --key "${S3_PREFIX}${UF_BASE}" &>/dev/null
-            if [ $? -eq 0 ]; then
-                echo -e "${GRN}✓ Verified in S3: $UF_BASE${NC}"
-                log "SUCCESS: $UF_BASE uploaded and verified"
-                rm -f "$UF"
-            else
-                echo -e "${RED}✗ Upload succeeded but S3 verification failed: $UF_BASE${NC}"
-                log "WARN: $UF_BASE upload ok but head-object failed"
-            fi
-        else
-            echo -e "${RED}✗ Upload failed: $UF_BASE${NC}"
-            log "FAIL: $UF_BASE upload failed"
+        if upload_file "$UF"; then
+            rm -f "$UF"
         fi
     done
 

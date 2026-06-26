@@ -68,3 +68,8 @@ variable "project_name" {
   type        = string
   default     = "aria2-downloader"
 }
+
+variable "volume_size" {
+  description = "Volume Size"
+  default = 30
+}

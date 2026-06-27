@@ -668,4 +668,4 @@ done
 
 echo -e "\n${BLD}${GRN}════════ All Batches Complete ════════${NC}"
 echo -e "${BLU}Log saved to: $LOGFILE${NC}"
-log "===== Session completed ======"
+log "======== Session completed and Upload Done ========="

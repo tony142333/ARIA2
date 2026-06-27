@@ -28,7 +28,7 @@ resource "aws_instance" "aria2" {
   })
 
   root_block_device {
-    volume_size = var.volume_size
+    volume_size = 30
     volume_type = "gp3"
     encrypted   = true
   }
@@ -49,5 +49,3 @@ resource "aws_eip" "aria2" {
 
   depends_on = [aws_internet_gateway.main]
 }
-
-

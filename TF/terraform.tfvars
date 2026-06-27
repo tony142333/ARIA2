@@ -23,7 +23,3 @@ ssh_key_name = "spidy"
 
 # Project
 project_name = "aria2-downloader"
-
-volume_size = 60
-
-

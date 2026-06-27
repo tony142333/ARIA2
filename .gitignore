@@ -2,3 +2,9 @@ TF/.terraform/
 
 
 TF/rm.txt
+
+TF/.terraform/
+TF/terraform.tfstate
+TF/terraform.tfstate.backup
+TF/*.tfvars
+TF/*.pem

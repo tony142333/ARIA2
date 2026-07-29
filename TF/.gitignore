@@ -3,7 +3,7 @@ TF/.terraform/
 TF/.terraform.lock.hcl
 
 TF/terraform.tfstate.backup
-
+TF/spidy2.pem
 
 
 

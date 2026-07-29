@@ -46,7 +46,7 @@ docker run -d \
   p3terx/ariang
 
 
-aws s3 cp s3://mybuckets123tarunv6/scripts/upload.sh /home/ubuntu/upload.sh --region ap-south-2
+aws s3 cp s3://mybuckets123tarunv7/scripts/upload.sh /home/ubuntu/upload.sh --region ap-south-2
 chown ubuntu:ubuntu /home/ubuntu/upload.sh
 chmod +x /home/ubuntu/upload.sh
 

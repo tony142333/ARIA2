@@ -324,7 +324,7 @@ log "=== Session started ==="
 check_deps
 
 # ── Bucket (hardcoded) ───────────────────────────────────────
-BUCKET="mybuckets123tarunv6"
+BUCKET="mybuckets123tarunv7"
 echo -e "${BLU}Bucket : ${BLD}$BUCKET${NC}"
 
 # ── S3 Prefix ────────────────────────────────────────────────
@@ -668,7 +668,4 @@ done
 
 echo -e "\n${BLD}${GRN}════════ All Batches Complete ════════${NC}"
 echo -e "${BLU}Log saved to: $LOGFILE${NC}"
-log "======== Session completed and Upload Done ========="
-
-
-
+log "===== Session completed ======"

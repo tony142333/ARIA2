@@ -28,7 +28,7 @@ resource "aws_instance" "aria2" {
   })
 
   root_block_device {
-    volume_size = 30
+    volume_size = 60
     volume_type = "gp3"
     encrypted   = true
   }

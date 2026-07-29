@@ -19,7 +19,7 @@ allowed_ssh_cidr = "0.0.0.0/0"
 allowed_web_cidr = "0.0.0.0/0"
 
 # SSH Key - UPDATE THIS!
-ssh_key_name = "spidy"
+ssh_key_name = "spidy2"
 
 # Project
 project_name = "aria2-downloader"

@@ -23,3 +23,10 @@ ssh_key_name = "spidy2"
 
 # Project
 project_name = "aria2-downloader"
+
+
+git_branch = "main"
+
+
+execution_mode = "both"
+priority_app = "aria2"

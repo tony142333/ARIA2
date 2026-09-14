@@ -4,50 +4,35 @@ set -e
 TARGET_BRANCH="${git_branch}"
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
+apt-get update -y
 
-# 1. Install Docker & bring up Aria2 / AriaNg first
-curl -fsSL https://get.docker.com -o get-docker.sh
-sh get-docker.sh
-systemctl start docker
-systemctl enable docker
-
-mkdir -p /home/ubuntu/downloads
-chown ubuntu:ubuntu /home/ubuntu/downloads
-
-docker run -d \
-  --name aria2 \
-  --restart=unless-stopped \
-  -p 6800:6800 \
-  -v /home/ubuntu/downloads:/downloads \
-  -e PUID=1000 \
-  -e PGID=1000 \
-  -e RPC_SECRET=aria2secret \
-  -e EXTRA_ARGS="--auto-file-renaming=true --allow-overwrite=false --check-certificate=false" \
-  p3terx/aria2-pro
-
-docker run -d \
-  --name ariang \
-  --restart=unless-stopped \
-  -p 8080:6880 \
-  p3terx/ariang
-
-# 2. Deferred setup: Install host packages and Stream Grabber
+# 1. Install System Dependencies
 apt-get install -y python3-pip python3-venv aria2 git awscli
 
+# 2. Setup Application Directory & Repository
 rm -rf /home/ubuntu/stream-grabber-app
 git clone -b "$TARGET_BRANCH" https://github.com/tony142333/stream-grabber-app.git /home/ubuntu/stream-grabber-app
 chown -R ubuntu:ubuntu /home/ubuntu/stream-grabber-app
 
+# 3. Setup Downloads Directory with Strict User Ownership & Permissions
+mkdir -p /home/ubuntu/downloads
+chown -R ubuntu:ubuntu /home/ubuntu/downloads
+chmod -R 775 /home/ubuntu/downloads
+
+# 4. Python Virtual Environment Setup (Ubuntu User Level)
 sudo -u ubuntu bash << 'USER_EOF'
 cd /home/ubuntu/stream-grabber-app
 python3 -m venv venv
 source venv/bin/activate
 pip install --no-cache-dir --upgrade pip
 pip install --no-cache-dir -r requirements.txt
-playwright install --with-deps chromium
+playwright install chromium
 USER_EOF
 
+# 5. Playwright System Shared Libraries (Root Level via venv CLI)
+/home/ubuntu/stream-grabber-app/venv/bin/playwright install-deps chromium
+
+# 6. Systemd Service Setup
 cat << 'SERVICE_EOF' > /etc/systemd/system/stream-grabber.service
 [Unit]
 Description=EC2 Stream Grabber FastAPI Console
@@ -66,10 +51,12 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 SERVICE_EOF
-
+chown -R ubuntu:ubuntu /home/ubuntu/stream-grabber-app
+chmod -R 755 /home/ubuntu/stream-grabber-app
 systemctl daemon-reload
 systemctl enable --now stream-grabber.service
 
-aws s3 cp s3://mybuckets123tarunv7/scripts/upload.sh /home/ubuntu/upload.sh --region ap-south-2
-chown ubuntu:ubuntu /home/ubuntu/upload.sh
-chmod +x /home/ubuntu/upload.sh
+# 7. S3 Script Retrieval
+aws s3 cp s3://mybuckets123tarunv7/scripts/upload.sh /home/ubuntu/upload.sh --region ap-south-2 || true
+chown ubuntu:ubuntu /home/ubuntu/upload.sh || true
+chmod +x /home/ubuntu/upload.sh || true

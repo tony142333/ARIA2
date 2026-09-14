@@ -14,6 +14,28 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+# Priority-based User Data Execution Router
+locals {
+  userdata_aria2 = file("${path.module}/user_data_blocks/userdata_aria2.sh")
+  userdata_app   = templatefile("${path.module}/user_data_blocks/userdata_app.sh", {
+    git_branch = var.git_branch
+  })
+
+  # Order scripts based on priority_app when running both (Defaults to aria2 first)
+  both_combined = (
+    var.priority_app == "aria2"
+    ? "${local.userdata_aria2}\n\n${local.userdata_app}"
+    : "${local.userdata_app}\n\n${local.userdata_aria2}"
+  )
+
+  # Final userdata payload selection
+  selected_userdata = (
+    var.execution_mode == "aria2" ? local.userdata_aria2 :
+      var.execution_mode == "app"   ? local.userdata_app :
+      local.both_combined
+  )
+}
+
 # EC2 Instance
 resource "aws_instance" "aria2" {
   ami                    = data.aws_ami.ubuntu.id
@@ -23,9 +45,7 @@ resource "aws_instance" "aria2" {
   vpc_security_group_ids = [aws_security_group.aria2.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
 
-  user_data = templatefile("${path.module}/user_data.sh", {
-    upload_script = file("${path.module}/upload.sh")
-  })
+  user_data = local.selected_userdata
 
   root_block_device {
     volume_size = 60

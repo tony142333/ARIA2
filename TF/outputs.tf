@@ -42,3 +42,22 @@ output "iam_role" {
   description = "IAM role attached to instance for S3 access"
   value       = aws_iam_role.ec2_s3_access.name
 }
+output "stream_grabber" {
+  description = "stream_grabber Web Interface URL"
+  value       = "http://${aws_eip.aria2.public_ip}:8085"
+}
+
+output "branch" {
+  description = "Branch used"
+  value = "${var.git_branch}"
+}
+
+# In outputs.tf
+output "deployment_source" {
+  description = "Git branch and exact commit deployed to the EC2 instance"
+  value = {
+    branch       = var.app_branch
+    commit_sha   = data.external.git_commit.result.commit
+    short_sha    = data.external.git_commit.result.short_commit
+  }
+}

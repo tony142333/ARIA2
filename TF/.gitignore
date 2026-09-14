@@ -10,6 +10,9 @@ TF/spidy2.pem
 *.pem
 
 
+*.tfstate
+*.tfvars
+
 
 
 

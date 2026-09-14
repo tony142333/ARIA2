@@ -52,3 +52,14 @@ resource "aws_security_group_rule" "egress_all" {
   security_group_id = aws_security_group.aria2.id
   description       = "Allow all outbound traffic"
 }
+
+# Stream Grabber / Web Console UI Access (Port 8085)
+resource "aws_security_group_rule" "stream_grabber_web" {
+  type              = "ingress"
+  from_port         = 8085
+  to_port           = 8085
+  protocol          = "tcp"
+  cidr_blocks       = [var.allowed_web_cidr]
+  security_group_id = aws_security_group.aria2.id
+  description       = "Stream Grabber Web Console UI access"
+}

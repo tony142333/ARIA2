@@ -68,3 +68,48 @@ variable "project_name" {
   type        = string
   default     = "aria2-downloader"
 }
+
+
+variable "git_branch" {
+  type        = string
+  description = "Target Git branch to deploy on EC2"
+  default     = "main"
+}
+
+variable "execution_mode" {
+  type        = string
+  default     = "both"
+  description = "Execution mode: 'aria2', 'app', or 'both'"
+
+  validation {
+    condition     = contains(["aria2", "app", "both"], var.execution_mode)
+    error_message = "The execution_mode must be 'aria2', 'app', or 'both'."
+  }
+}
+
+variable "priority_app" {
+  type        = string
+  default     = "aria2"
+  description = "When execution_mode is 'both', determines which app deploys first: 'aria2' (Docker/Aria2 first) or 'app' (Stream Grabber first)"
+
+  validation {
+    condition     = contains(["aria2", "app"], var.priority_app)
+    error_message = "The priority_app must be 'aria2' or 'app'."
+  }
+}
+
+# In variables.tf (or wherever your branch is defined)
+variable "app_branch" {
+  type        = string
+  description = "Target Git branch to pull on EC2"
+  default     = "main"
+}
+
+# In main.tf / data.tf: Fetch the commit SHA of that branch locally
+data "external" "git_commit" {
+  program = [
+    "bash", "-c",
+    "echo \"{\\\"commit\\\": \\\"$(git rev-parse ${var.app_branch})\\\", \\\"short_commit\\\": \\\"$(git rev-parse --short ${var.app_branch})\\\"}\""
+  ]
+}
+
